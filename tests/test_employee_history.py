@@ -99,3 +99,20 @@ def test_history_pdf(client, ingest, admin_headers):
     assert response.status_code == 200
     assert response.content.startswith(b"%PDF")
     assert "EMP-0042" in response.headers["content-disposition"]
+
+
+def test_special_request_reply_comment_shows_as_request_remarks(client, ingest, admin_headers):
+    ingest(
+        make_event(module="Special Requests", category="Special Requests", action="Special Request Created",
+                   event_type="SPECIAL_REQUEST_CREATED", request_id="295", occurred_at="2026-09-20T04:00:00+00:00",
+                   details={"request_type": "Salary Confirmation Letter", "status": "Pending"}),
+        make_event(module="Special Requests", category="Special Requests", action="Special Request Completed",
+                   event_type="SPECIAL_REQUEST_COMPLETED", request_id="295",
+                   occurred_at="2026-09-21T04:00:00+00:00",
+                   details={"request_type": "Salary Confirmation Letter", "status": "Completed",
+                            "admin_comments": "Letter attached."}),
+    )
+    [request] = client.get("/api/v1/audit/employees/42/history",
+                           headers=admin_headers).json()["results"]["requests"]
+    assert request["remarks"] == "Letter attached."
+    assert request["status"] == "Completed"
