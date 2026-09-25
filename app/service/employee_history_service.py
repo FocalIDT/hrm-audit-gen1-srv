@@ -222,7 +222,8 @@ class EmployeeHistoryService:
             entry["last_action"] = record.action
             entry["last_updated_at"] = as_utc_iso(record.occurred_at)
             entry["responsible_person"] = record.performed_by_name
-            entry["remarks"] = record.remarks or entry.get("remarks")
+            # Special request replies carry their text as admin_comments rather than remarks.
+            entry["remarks"] = record.remarks or details.get("admin_comments") or entry.get("remarks")
             entry["completed_at"] = as_utc_iso(record.occurred_at) if _is_final(status) else None
         return sorted(grouped.values(), key=lambda item: item["requested_at"] or "", reverse=True)
 

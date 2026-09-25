@@ -101,6 +101,23 @@ def test_history_pdf(client, ingest, admin_headers):
     assert "EMP-0042" in response.headers["content-disposition"]
 
 
+def test_special_request_reply_comment_shows_as_request_remarks(client, ingest, admin_headers):
+    ingest(
+        make_event(module="Special Requests", category="Special Requests", action="Special Request Created",
+                   event_type="SPECIAL_REQUEST_CREATED", request_id="295", occurred_at="2026-09-20T04:00:00+00:00",
+                   details={"request_type": "Salary Confirmation Letter", "status": "Pending"}),
+        make_event(module="Special Requests", category="Special Requests", action="Special Request Completed",
+                   event_type="SPECIAL_REQUEST_COMPLETED", request_id="295",
+                   occurred_at="2026-09-21T04:00:00+00:00",
+                   details={"request_type": "Salary Confirmation Letter", "status": "Completed",
+                            "admin_comments": "Letter attached."}),
+    )
+    [request] = client.get("/api/v1/audit/employees/42/history",
+                           headers=admin_headers).json()["results"]["requests"]
+    assert request["remarks"] == "Letter attached."
+    assert request["status"] == "Completed"
+
+
 def _baseline(ingest):
     ingest(make_event(action="Employee Created", event_type="EMPLOYEE_CREATED",
                       occurred_at="2024-01-10T04:00:00+00:00", effective_date="2024-01-10",
