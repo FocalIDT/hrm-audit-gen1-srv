@@ -116,3 +116,70 @@ def test_special_request_reply_comment_shows_as_request_remarks(client, ingest, 
                            headers=admin_headers).json()["results"]["requests"]
     assert request["remarks"] == "Letter attached."
     assert request["status"] == "Completed"
+
+
+def _baseline(ingest):
+    ingest(make_event(action="Employee Created", event_type="EMPLOYEE_CREATED",
+                      occurred_at="2024-01-10T04:00:00+00:00", effective_date="2024-01-10",
+                      changes=[_change("designation", "Designation", None, "Software Engineer"),
+                               _change("basic_salary", "Basic Salary", None, "150000", "currency")]))
+
+
+def _designation(when, old, new, **extra):
+    return make_event(action="Designation Changed", event_type="DESIGNATION_CHANGED", occurred_at=when,
+                      effective_date=when[:10],
+                      changes=[_change("designation", "Designation", old, new)], **extra)
+
+
+def _salary(when, old, new, action="Salary Increment", event_type="SALARY_INCREMENT"):
+    return make_event(module="Payroll", category="Salary", action=action, event_type=event_type,
+                      occurred_at=when, effective_date=when[:10],
+                      changes=[_change("basic_salary", "Basic Salary", old, new, "currency")])
+
+
+def _history(client, admin_headers):
+    return client.get("/api/v1/audit/employees/42/history", headers=admin_headers).json()["results"]
+
+
+def test_same_day_designation_then_salary_counts_as_a_promotion(client, ingest, admin_headers):
+    _baseline(ingest)
+    ingest(_designation("2026-09-01T04:00:00+00:00", "Software Engineer", "Senior Software Engineer",
+                        reference_id="PR-00025"),
+           _salary("2026-09-01T06:30:00+00:00", "150000", "200000"))
+    history = _history(client, admin_headers)
+
+    [promotion] = history["promotions"]
+    assert promotion["previous_role"] == "Software Engineer"
+    assert promotion["new_role"] == "Senior Software Engineer"
+    assert (promotion["previous_salary"], promotion["new_salary"]) == (150000.0, 200000.0)
+    assert promotion["increment_pct"] == 33.3
+    assert promotion["effective_date"] == "2026-09-01"
+    assert promotion["reference_id"] == "PR-00025"
+    assert promotion["audit_id"] == "AUD-000002" and promotion["related_audit_ids"] == ["AUD-000003"]
+    assert history["summary"]["total_promotions"] == 1
+
+    timeline = history["career_timeline"]
+    assert [(t["designation"], t["salary"], t["increment_pct"]) for t in timeline] == [
+        ("Senior Software Engineer", 200000.0, 33.3), ("Software Engineer", 150000.0, None)]
+    assert [p["salary"] for p in history["salary_history"]] == [150000.0, 200000.0]
+
+
+def test_same_day_salary_then_designation_keeps_the_old_role_salary(client, ingest, admin_headers):
+    _baseline(ingest)
+    ingest(_salary("2026-09-01T04:00:00+00:00", "150000", "200000"),
+           _designation("2026-09-01T06:30:00+00:00", "Software Engineer", "Senior Software Engineer"))
+    history = _history(client, admin_headers)
+    assert len(history["promotions"]) == 1
+    timeline = history["career_timeline"]
+    # The raise belongs to the new role, not to the role the employee held that morning.
+    assert [(t["designation"], t["salary"]) for t in timeline] == [
+        ("Senior Software Engineer", 200000.0), ("Software Engineer", 150000.0)]
+
+
+def test_changes_on_different_days_or_a_salary_cut_are_not_promotions(client, ingest, admin_headers):
+    _baseline(ingest)
+    ingest(_designation("2026-09-01T04:00:00+00:00", "Software Engineer", "Tech Lead"),
+           _salary("2026-09-02T04:00:00+00:00", "150000", "180000"),
+           _designation("2026-09-10T04:00:00+00:00", "Tech Lead", "Architect"),
+           _salary("2026-09-10T05:00:00+00:00", "180000", "170000", "Salary Decrement", "SALARY_DECREMENT"))
+    assert _history(client, admin_headers)["promotions"] == []
