@@ -189,7 +189,7 @@ class AuditReportService:
         requests = history.get("requests") or []
         if requests:
             story += [Paragraph("Employee Request History", _SECTION),
-                      _grid([["Type", "Request ID", "Requested", "Status", "Responsible", "Completed"]] +
+                      _grid([["Type", "Request ID", "Requested Date", "Status", "Responsible", "Completed"]] +
                             [[r["request_type"], r["request_id"], r["requested_at"], r["status"],
                               r["responsible_person"], r["completed_at"]] for r in requests],
                             [width * 0.18, width * 0.12, width * 0.2, width * 0.16, width * 0.14, width * 0.2])]
