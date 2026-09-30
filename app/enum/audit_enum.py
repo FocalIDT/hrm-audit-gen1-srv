@@ -8,6 +8,7 @@ class AuditModule(str, Enum):
     LEAVE = "Leave"
     WFH = "WFH"
     SPECIAL_REQUESTS = "Special Requests"
+    EMPLOYEE_RELATIONS = "Employee Relations"
     ATTENDANCE = "Attendance"
     OVERTIME = "Overtime"
     DOCUMENTS = "Documents"
@@ -20,7 +21,7 @@ class AuditModule(str, Enum):
 
 
 class AuditCategory(str, Enum):
-    """The 19 top-level audit categories from the requirements (section 23)."""
+    """The 19 top-level audit categories from the requirements (section 23), plus Employee Relations."""
     EMPLOYEE = "Employee"
     PROMOTION = "Promotion"
     SALARY = "Salary"
@@ -31,6 +32,7 @@ class AuditCategory(str, Enum):
     LEAVE = "Leave"
     WFH = "WFH"
     SPECIAL_REQUESTS = "Special Requests"
+    EMPLOYEE_RELATIONS = "Employee Relations"
     ATTENDANCE = "Attendance"
     OVERTIME = "Overtime"
     DOCUMENTS = "Documents"
@@ -72,6 +74,10 @@ SALARY_EVENT_TYPES = (EVENT_EMPLOYEE_CREATED, EVENT_EMPLOYEE_PROMOTED, EVENT_SAL
 FIELD_DESIGNATION = "designation"
 FIELD_BASIC_SALARY = "basic_salary"
 FIELD_DEPARTMENT = "department"
+
+# Warnings, notices, disciplinary and other formal HR actions (one history row per record).
+EMPLOYEE_RELATION_MODULES = (AuditModule.EMPLOYEE_RELATIONS.value,)
+EMPLOYEE_RELATION_OPEN_STATUSES = {"active", "pending"}
 
 # Modules whose events represent an employee request (requirements section 14).
 REQUEST_MODULES = (AuditModule.LEAVE.value, AuditModule.WFH.value, AuditModule.SPECIAL_REQUESTS.value)

@@ -193,6 +193,14 @@ class AuditReportService:
                             [[r["request_type"], r["request_id"], r["requested_at"], r["status"],
                               r["responsible_person"], r["completed_at"]] for r in requests],
                             [width * 0.18, width * 0.12, width * 0.2, width * 0.16, width * 0.14, width * 0.2])]
+        relations = history.get("employee_relations") or []
+        if relations:
+            story += [Paragraph("Employee Relations", _SECTION),
+                      _grid([["Date", "Type", "Subject", "Action Taken", "Level", "Status", "Issued By"]] +
+                            [[r["action_date"], r["action_type"], r["subject"], r["action_taken"],
+                              r["action_level"], r["status"], r["issued_by"]] for r in relations],
+                            [width * 0.12, width * 0.15, width * 0.2, width * 0.18, width * 0.09, width * 0.11,
+                             width * 0.15])]
         return _build(story, f"Employee history {_text(employee.get('employee_code'))}")
 
 

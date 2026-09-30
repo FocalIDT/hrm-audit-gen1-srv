@@ -14,9 +14,10 @@ from typing import Optional
 from sqlalchemy.orm import Session
 
 from app.entity.audit_log_entity import AuditLog
-from app.enum.audit_enum import (CAREER_EVENT_TYPES, EVENT_DESIGNATION_CHANGED, EVENT_EMPLOYEE_CREATED,
-                                 EVENT_EMPLOYEE_PROMOTED, EVENT_SALARY_INCREMENT, FIELD_BASIC_SALARY,
-                                 FIELD_DEPARTMENT, FIELD_DESIGNATION, REQUEST_MODULES, SALARY_EVENT_TYPES)
+from app.enum.audit_enum import (CAREER_EVENT_TYPES, EMPLOYEE_RELATION_MODULES, EMPLOYEE_RELATION_OPEN_STATUSES,
+                                 EVENT_DESIGNATION_CHANGED, EVENT_EMPLOYEE_CREATED, EVENT_EMPLOYEE_PROMOTED,
+                                 EVENT_SALARY_INCREMENT, FIELD_BASIC_SALARY, FIELD_DEPARTMENT, FIELD_DESIGNATION,
+                                 REQUEST_MODULES, SALARY_EVENT_TYPES)
 from app.model.access_token import AccessToken
 from app.repository.audit_log_repository import audit_log_repository
 from app.utils.formatters import as_utc_iso, format_audit_number, load_details
@@ -228,11 +229,46 @@ class EmployeeHistoryService:
         return sorted(grouped.values(), key=lambda item: item["requested_at"] or "", reverse=True)
 
     @classmethod
+    def _employee_relations(cls, events: list[AuditLog]) -> list[dict]:
+        """One row per Employee Relations record, showing its latest recorded state.
+
+        A deleted record keeps its row (status "Deleted"): the history answers what
+        happened, even when the record itself no longer exists.
+        """
+        grouped: dict[str, dict] = {}
+        for record in events:
+            key = record.request_id or record.reference_id or f"audit-{record.audit_number}"
+            details = load_details(record)
+            entry = grouped.get(key)
+            if entry is None:
+                entry = grouped[key] = {"relation_id": record.request_id or record.reference_id,
+                                        "recorded_at": as_utc_iso(record.occurred_at), "events": 0}
+            entry["events"] += 1
+            for field in ("action_date", "action_type", "subject", "action_taken", "action_level", "issued_by",
+                          "status"):
+                if details.get(field) not in (None, ""):
+                    entry[field] = details[field]
+            entry["remarks"] = record.remarks
+            entry["last_action"] = record.action
+            entry["last_updated_at"] = as_utc_iso(record.occurred_at)
+            entry["last_updated_by"] = record.performed_by_name
+        rows = []
+        for entry in grouped.values():
+            for field in ("action_date", "action_type", "subject", "action_taken", "action_level", "issued_by",
+                          "status", "remarks"):
+                entry.setdefault(field, None)
+            rows.append(entry)
+        return sorted(rows, key=lambda item: (item["action_date"] or item["recorded_at"] or "",
+                                              item["recorded_at"] or ""), reverse=True)
+
+    @classmethod
     def get_history(cls, db: Session, token: AccessToken, employee_id: int) -> dict:
         client_id = token.client_id
         event_types = set(CAREER_EVENT_TYPES) | set(SALARY_EVENT_TYPES)
         career_events = audit_log_repository.employee_events(db, client_id, employee_id, event_types=event_types)
         request_events = audit_log_repository.employee_events(db, client_id, employee_id, modules=REQUEST_MODULES)
+        relation_events = audit_log_repository.employee_events(db, client_id, employee_id,
+                                                               modules=EMPLOYEE_RELATION_MODULES)
         latest = audit_log_repository.employee_events(db, client_id, employee_id)
 
         timeline, salary_points, promotions = cls._career_and_salary(career_events)
@@ -241,6 +277,7 @@ class EmployeeHistoryService:
         first_salary = known_salaries[0] if known_salaries else None
         current_salary = known_salaries[-1] if known_salaries else None
 
+        employee_relations = cls._employee_relations(relation_events)
         subject = latest[-1] if latest else None
         return {
             "employee": {
@@ -260,8 +297,12 @@ class EmployeeHistoryService:
                 "overall_salary_increase_pct": _pct(first_salary, current_salary),
                 "total_promotions": len(promotions),
                 "total_events": len(latest),
+                "total_employee_relations": sum(1 for r in employee_relations if r["status"] != "Deleted"),
+                "open_employee_relations": sum(1 for r in employee_relations
+                                               if str(r["status"] or "").lower() in EMPLOYEE_RELATION_OPEN_STATUSES),
             },
             "requests": cls._requests(request_events),
+            "employee_relations": employee_relations,
             "activity_by_module": {
                 module: count
                 for module, count in audit_log_repository.module_counts_for_employee(db, client_id, employee_id)
