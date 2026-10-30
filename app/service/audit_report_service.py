@@ -131,10 +131,17 @@ class AuditReportService:
                       _grid([["Field", "Previous Value", "New Value"]] +
                             [[c["field_label"], c["old_value"], c["new_value"]] for c in detail["changes"]],
                             [width * 0.3, width * 0.35, width * 0.35])]
-        if detail["details"]:
+        assigned = [e for e in detail["details"].get("assigned_employees") or [] if isinstance(e, dict)]
+        if assigned:
+            story += [Paragraph("Employee Details", _SECTION),
+                      _grid([["Employee No.", "Employee Name"]] +
+                            [[e.get("number"), e.get("name") or "Unknown employee"] for e in assigned],
+                            [width * 0.25, width * 0.75])]
+        other_details = {k: v for k, v in detail["details"].items() if k != "assigned_employees"}
+        if other_details:
             story += [Paragraph("Additional Information", _SECTION),
                       _grid([["Item", "Value"]] + [[key.replace("_", " ").title(), value]
-                                                   for key, value in detail["details"].items()],
+                                                   for key, value in other_details.items()],
                             [width * 0.35, width * 0.65])]
         if detail["related"]:
             story += [Paragraph("Related Events (same operation)", _SECTION),
@@ -182,10 +189,18 @@ class AuditReportService:
         requests = history.get("requests") or []
         if requests:
             story += [Paragraph("Employee Request History", _SECTION),
-                      _grid([["Type", "Request ID", "Requested", "Status", "Responsible", "Completed"]] +
+                      _grid([["Type", "Request ID", "Requested Date", "Status", "Responsible", "Completed"]] +
                             [[r["request_type"], r["request_id"], r["requested_at"], r["status"],
                               r["responsible_person"], r["completed_at"]] for r in requests],
                             [width * 0.18, width * 0.12, width * 0.2, width * 0.16, width * 0.14, width * 0.2])]
+        relations = history.get("employee_relations") or []
+        if relations:
+            story += [Paragraph("Employee Relations", _SECTION),
+                      _grid([["Date", "Type", "Subject", "Action Taken", "Level", "Status", "Issued By"]] +
+                            [[r["action_date"], r["action_type"], r["subject"], r["action_taken"],
+                              r["action_level"], r["status"], r["issued_by"]] for r in relations],
+                            [width * 0.12, width * 0.15, width * 0.2, width * 0.18, width * 0.09, width * 0.11,
+                             width * 0.15])]
         return _build(story, f"Employee history {_text(employee.get('employee_code'))}")
 
 

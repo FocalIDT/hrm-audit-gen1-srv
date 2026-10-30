@@ -142,3 +142,23 @@ def test_integrity_verification_detects_deleted_rows(client, ingest, admin_heade
     result = client.get("/api/v1/audit/integrity/verify", headers=admin_headers).json()["results"]
     assert result["is_valid"] is False
     assert result["problem"] == "records at the end of the chain are missing"
+
+
+def test_pdf_report_lists_assigned_employees(client, ingest, admin_headers):
+    from app.service import audit_report_service as reports
+    captured = []
+    real_grid = reports._grid
+    reports._grid = lambda rows, widths, header=True: captured.append(rows) or real_grid(rows, widths, header)
+    try:
+        ingest(make_event(module="System Configuration", category="Leave", action="Leave Workflow Assigned",
+                          event_type="LEAVE_WORKFLOW_ASSIGNED",
+                          details={"workflow": "Standard", "employee_count": 2,
+                                   "assigned_employees": [{"name": "John Perera", "number": "2"},
+                                                          {"name": "Sarah Silva", "number": "5"}]}))
+        response = client.get("/api/v1/audit/logs/AUD-000001/report", headers=admin_headers)
+    finally:
+        reports._grid = real_grid
+    assert response.status_code == 200 and response.content.startswith(b"%PDF")
+    assert [["Employee No.", "Employee Name"], ["2", "John Perera"], ["5", "Sarah Silva"]] in captured
+    additional = next(rows for rows in captured if rows[0] == ["Item", "Value"])
+    assert all(row[0] != "Assigned Employees" for row in additional)

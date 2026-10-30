@@ -99,3 +99,141 @@ def test_history_pdf(client, ingest, admin_headers):
     assert response.status_code == 200
     assert response.content.startswith(b"%PDF")
     assert "EMP-0042" in response.headers["content-disposition"]
+
+
+def test_special_request_reply_comment_shows_as_request_remarks(client, ingest, admin_headers):
+    ingest(
+        make_event(module="Special Requests", category="Special Requests", action="Special Request Created",
+                   event_type="SPECIAL_REQUEST_CREATED", request_id="295", occurred_at="2026-09-20T04:00:00+00:00",
+                   details={"request_type": "Salary Confirmation Letter", "status": "Pending"}),
+        make_event(module="Special Requests", category="Special Requests", action="Special Request Completed",
+                   event_type="SPECIAL_REQUEST_COMPLETED", request_id="295",
+                   occurred_at="2026-09-21T04:00:00+00:00",
+                   details={"request_type": "Salary Confirmation Letter", "status": "Completed",
+                            "admin_comments": "Letter attached."}),
+    )
+    [request] = client.get("/api/v1/audit/employees/42/history",
+                           headers=admin_headers).json()["results"]["requests"]
+    assert request["remarks"] == "Letter attached."
+    assert request["status"] == "Completed"
+
+
+def _baseline(ingest):
+    ingest(make_event(action="Employee Created", event_type="EMPLOYEE_CREATED",
+                      occurred_at="2024-01-10T04:00:00+00:00", effective_date="2024-01-10",
+                      changes=[_change("designation", "Designation", None, "Software Engineer"),
+                               _change("basic_salary", "Basic Salary", None, "150000", "currency")]))
+
+
+def _designation(when, old, new, **extra):
+    return make_event(action="Designation Changed", event_type="DESIGNATION_CHANGED", occurred_at=when,
+                      effective_date=when[:10],
+                      changes=[_change("designation", "Designation", old, new)], **extra)
+
+
+def _salary(when, old, new, action="Salary Increment", event_type="SALARY_INCREMENT"):
+    return make_event(module="Payroll", category="Salary", action=action, event_type=event_type,
+                      occurred_at=when, effective_date=when[:10],
+                      changes=[_change("basic_salary", "Basic Salary", old, new, "currency")])
+
+
+def _history(client, admin_headers):
+    return client.get("/api/v1/audit/employees/42/history", headers=admin_headers).json()["results"]
+
+
+def test_same_day_designation_then_salary_counts_as_a_promotion(client, ingest, admin_headers):
+    _baseline(ingest)
+    ingest(_designation("2026-09-01T04:00:00+00:00", "Software Engineer", "Senior Software Engineer",
+                        reference_id="PR-00025"),
+           _salary("2026-09-01T06:30:00+00:00", "150000", "200000"))
+    history = _history(client, admin_headers)
+
+    [promotion] = history["promotions"]
+    assert promotion["previous_role"] == "Software Engineer"
+    assert promotion["new_role"] == "Senior Software Engineer"
+    assert (promotion["previous_salary"], promotion["new_salary"]) == (150000.0, 200000.0)
+    assert promotion["increment_pct"] == 33.3
+    assert promotion["effective_date"] == "2026-09-01"
+    assert promotion["reference_id"] == "PR-00025"
+    assert promotion["audit_id"] == "AUD-000002" and promotion["related_audit_ids"] == ["AUD-000003"]
+    assert history["summary"]["total_promotions"] == 1
+
+    timeline = history["career_timeline"]
+    assert [(t["designation"], t["salary"], t["increment_pct"]) for t in timeline] == [
+        ("Senior Software Engineer", 200000.0, 33.3), ("Software Engineer", 150000.0, None)]
+    assert [p["salary"] for p in history["salary_history"]] == [150000.0, 200000.0]
+
+
+def test_same_day_salary_then_designation_keeps_the_old_role_salary(client, ingest, admin_headers):
+    _baseline(ingest)
+    ingest(_salary("2026-09-01T04:00:00+00:00", "150000", "200000"),
+           _designation("2026-09-01T06:30:00+00:00", "Software Engineer", "Senior Software Engineer"))
+    history = _history(client, admin_headers)
+    assert len(history["promotions"]) == 1
+    timeline = history["career_timeline"]
+    # The raise belongs to the new role, not to the role the employee held that morning.
+    assert [(t["designation"], t["salary"]) for t in timeline] == [
+        ("Senior Software Engineer", 200000.0), ("Software Engineer", 150000.0)]
+
+
+def test_changes_on_different_days_or_a_salary_cut_are_not_promotions(client, ingest, admin_headers):
+    _baseline(ingest)
+    ingest(_designation("2026-09-01T04:00:00+00:00", "Software Engineer", "Tech Lead"),
+           _salary("2026-09-02T04:00:00+00:00", "150000", "180000"),
+           _designation("2026-09-10T04:00:00+00:00", "Tech Lead", "Architect"),
+           _salary("2026-09-10T05:00:00+00:00", "180000", "170000", "Salary Decrement", "SALARY_DECREMENT"))
+    assert _history(client, admin_headers)["promotions"] == []
+
+
+def _relation_event(action, relation_id, when, **details):
+    return make_event(module="Employee Relations", category="Employee Relations", action=action,
+                      event_type="EMPLOYEE_RELATION_" + action.split()[-1].upper(), request_id=relation_id,
+                      reference_id=relation_id, occurred_at=when,
+                      remarks=details.pop("remarks", None), details=details)
+
+
+def _relations(ingest):
+    warning = {"action_type": "Warning", "subject": "Attendance Policy Violation", "action_date": "2026-09-25",
+               "action_taken": "Written Warning Issued", "action_level": "Medium", "issued_by": "HR Manager"}
+    notice = {"action_type": "Notice", "subject": "Policy Compliance", "action_date": "2026-08-10",
+              "action_taken": "Formal Notice", "action_level": "Low", "issued_by": "HR Executive"}
+    ingest(
+        _relation_event("Employee Relation Created", "7", "2026-09-25T04:00:00+00:00", **warning, status="Active",
+                        remarks="First warning"),
+        _relation_event("Employee Relation Created", "5", "2026-08-10T04:00:00+00:00", **notice, status="Active"),
+        _relation_event("Employee Relation Updated", "5", "2026-08-20T04:00:00+00:00", **notice, status="Closed"),
+        _relation_event("Employee Relation Created", "9", "2026-09-01T04:00:00+00:00", action_type="Misconduct",
+                        subject="Raised in error", action_date="2026-09-01", action_level="High", status="Pending"),
+        _relation_event("Employee Relation Deleted", "9", "2026-09-02T04:00:00+00:00", action_type="Misconduct",
+                        subject="Raised in error", action_date="2026-09-01", action_level="High", status="Deleted"),
+    )
+
+
+def test_employee_relations_show_each_record_once_with_its_latest_state(client, ingest, admin_headers):
+    _relations(ingest)
+    history = client.get("/api/v1/audit/employees/42/history", headers=admin_headers).json()["results"]
+
+    relations = history["employee_relations"]
+    assert [r["relation_id"] for r in relations] == ["7", "9", "5"]      # newest action date first
+    warning, deleted, notice = relations
+    assert warning["subject"] == "Attendance Policy Violation"
+    assert warning["action_taken"] == "Written Warning Issued" and warning["issued_by"] == "HR Manager"
+    assert warning["status"] == "Active" and warning["remarks"] == "First warning"
+    assert notice["status"] == "Closed" and notice["events"] == 2
+    assert notice["last_action"] == "Employee Relation Updated"
+    assert deleted["status"] == "Deleted"
+
+    assert history["summary"]["total_employee_relations"] == 2   # the deleted record is not counted
+    assert history["summary"]["open_employee_relations"] == 1
+    assert history["requests"] == []                               # not mixed into employee requests
+    assert history["activity_by_module"] == {"Employee Relations": 5}
+
+
+def test_history_pdf_includes_employee_relations(client, ingest, admin_headers):
+    _relations(ingest)
+    ingest(_relation_event("Employee Relation Created", "11", "2026-09-26T04:00:00+00:00",
+                           action_type="Benefits & Privilege Action", subject="Parking <revoked>",
+                           action_date="2026-09-26", action_level="Low", status="Active"))
+    response = client.get("/api/v1/audit/employees/42/history/report", headers=admin_headers)
+    assert response.status_code == 200
+    assert response.content.startswith(b"%PDF")

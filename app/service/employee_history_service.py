@@ -8,14 +8,16 @@ orchestrator fills that in from the employee's joining date.
 """
 from datetime import date
 from decimal import Decimal, InvalidOperation
+from types import SimpleNamespace
 from typing import Optional
 
 from sqlalchemy.orm import Session
 
 from app.entity.audit_log_entity import AuditLog
-from app.enum.audit_enum import (CAREER_EVENT_TYPES, EVENT_EMPLOYEE_CREATED, EVENT_EMPLOYEE_PROMOTED,
-                                 FIELD_BASIC_SALARY, FIELD_DEPARTMENT, FIELD_DESIGNATION, REQUEST_MODULES,
-                                 SALARY_EVENT_TYPES)
+from app.enum.audit_enum import (CAREER_EVENT_TYPES, EMPLOYEE_RELATION_MODULES, EMPLOYEE_RELATION_OPEN_STATUSES,
+                                 EVENT_DESIGNATION_CHANGED, EVENT_EMPLOYEE_CREATED, EVENT_EMPLOYEE_PROMOTED,
+                                 EVENT_SALARY_INCREMENT, FIELD_BASIC_SALARY, FIELD_DEPARTMENT, FIELD_DESIGNATION,
+                                 REQUEST_MODULES, SALARY_EVENT_TYPES)
 from app.model.access_token import AccessToken
 from app.repository.audit_log_repository import audit_log_repository
 from app.utils.formatters import as_utc_iso, format_audit_number, load_details
@@ -45,6 +47,54 @@ def _is_final(status) -> bool:
     return bool(words) and words[-1].lower() in _FINAL_REQUEST_STATUSES
 
 
+def _is_increment(record: AuditLog) -> bool:
+    change = _changes_by_key(record).get(FIELD_BASIC_SALARY)
+    old, new = (_to_number(change.old_value), _to_number(change.new_value)) if change else (None, None)
+    return old is not None and new is not None and new > old
+
+
+def _merge_same_day_promotions(events: list[AuditLog]) -> list:
+    """Treat a designation change and a salary increase on the same day as one promotion.
+
+    The UI saves both fields together, but HR often saves the new designation and
+    the new salary separately, producing a "Designation Changed" and a "Salary
+    Increment" record instead of one "Promotion". Audit records are immutable, so
+    the pair is combined here, when the history is built. The combined event takes
+    the place of the later of the two, keeping the timeline in order.
+    """
+    designations = [e for e in events if e.event_type == EVENT_DESIGNATION_CHANGED]
+    increments = [e for e in events if e.event_type == EVENT_SALARY_INCREMENT and _is_increment(e)]
+    replace: dict[int, SimpleNamespace] = {}
+    drop: set[int] = set()
+    for designation in designations:
+        day = _event_date(designation)
+        salary = next((e for e in increments if id(e) not in drop and _event_date(e) == day), None)
+        if salary is None:
+            continue
+        first, later = sorted((designation, salary), key=lambda e: (e.occurred_at, e.audit_number))
+        replace[id(later)] = SimpleNamespace(
+            event_type=EVENT_EMPLOYEE_PROMOTED,
+            action="Promotion",
+            changes=[*designation.changes, *salary.changes],
+            audit_number=designation.audit_number,
+            related_audit_numbers=[salary.audit_number],
+            occurred_at=later.occurred_at,
+            effective_date=day,
+            performed_by_role=designation.performed_by_role or salary.performed_by_role,
+            performed_by_name=designation.performed_by_name or salary.performed_by_name,
+            reference_id=designation.reference_id or salary.reference_id,
+            reason=designation.reason or salary.reason,
+        )
+        drop.update({id(first), id(designation), id(salary)})
+    merged = []
+    for event in events:
+        if id(event) in replace:
+            merged.append(replace[id(event)])
+        elif id(event) not in drop:
+            merged.append(event)
+    return merged
+
+
 def _event_date(record: AuditLog) -> date:
     return record.effective_date or record.occurred_at.date()
 
@@ -63,7 +113,7 @@ class EmployeeHistoryService:
         current_salary: Optional[float] = None
         current_department: Optional[str] = None
 
-        for record in events:
+        for record in _merge_same_day_promotions(events):
             changes = _changes_by_key(record)
             when = _event_date(record)
             salary_change = changes.get(FIELD_BASIC_SALARY)
@@ -132,6 +182,9 @@ class EmployeeHistoryService:
                     "approved_by_name": record.performed_by_name,
                     "reference_id": record.reference_id,
                     "reason": record.reason,
+                    # Set when the promotion was saved as separate designation and salary changes.
+                    "related_audit_ids": [format_audit_number(n)
+                                          for n in getattr(record, "related_audit_numbers", [])],
                 })
 
         previous_salary = None
@@ -170,9 +223,43 @@ class EmployeeHistoryService:
             entry["last_action"] = record.action
             entry["last_updated_at"] = as_utc_iso(record.occurred_at)
             entry["responsible_person"] = record.performed_by_name
-            entry["remarks"] = record.remarks or entry.get("remarks")
+            # Special request replies carry their text as admin_comments rather than remarks.
+            entry["remarks"] = record.remarks or details.get("admin_comments") or entry.get("remarks")
             entry["completed_at"] = as_utc_iso(record.occurred_at) if _is_final(status) else None
         return sorted(grouped.values(), key=lambda item: item["requested_at"] or "", reverse=True)
+
+    @classmethod
+    def _employee_relations(cls, events: list[AuditLog]) -> list[dict]:
+        """One row per Employee Relations record, showing its latest recorded state.
+
+        A deleted record keeps its row (status "Deleted"): the history answers what
+        happened, even when the record itself no longer exists.
+        """
+        grouped: dict[str, dict] = {}
+        for record in events:
+            key = record.request_id or record.reference_id or f"audit-{record.audit_number}"
+            details = load_details(record)
+            entry = grouped.get(key)
+            if entry is None:
+                entry = grouped[key] = {"relation_id": record.request_id or record.reference_id,
+                                        "recorded_at": as_utc_iso(record.occurred_at), "events": 0}
+            entry["events"] += 1
+            for field in ("action_date", "action_type", "subject", "action_taken", "action_level", "issued_by",
+                          "status"):
+                if details.get(field) not in (None, ""):
+                    entry[field] = details[field]
+            entry["remarks"] = record.remarks
+            entry["last_action"] = record.action
+            entry["last_updated_at"] = as_utc_iso(record.occurred_at)
+            entry["last_updated_by"] = record.performed_by_name
+        rows = []
+        for entry in grouped.values():
+            for field in ("action_date", "action_type", "subject", "action_taken", "action_level", "issued_by",
+                          "status", "remarks"):
+                entry.setdefault(field, None)
+            rows.append(entry)
+        return sorted(rows, key=lambda item: (item["action_date"] or item["recorded_at"] or "",
+                                              item["recorded_at"] or ""), reverse=True)
 
     @classmethod
     def get_history(cls, db: Session, token: AccessToken, employee_id: int) -> dict:
@@ -180,6 +267,8 @@ class EmployeeHistoryService:
         event_types = set(CAREER_EVENT_TYPES) | set(SALARY_EVENT_TYPES)
         career_events = audit_log_repository.employee_events(db, client_id, employee_id, event_types=event_types)
         request_events = audit_log_repository.employee_events(db, client_id, employee_id, modules=REQUEST_MODULES)
+        relation_events = audit_log_repository.employee_events(db, client_id, employee_id,
+                                                               modules=EMPLOYEE_RELATION_MODULES)
         latest = audit_log_repository.employee_events(db, client_id, employee_id)
 
         timeline, salary_points, promotions = cls._career_and_salary(career_events)
@@ -188,6 +277,7 @@ class EmployeeHistoryService:
         first_salary = known_salaries[0] if known_salaries else None
         current_salary = known_salaries[-1] if known_salaries else None
 
+        employee_relations = cls._employee_relations(relation_events)
         subject = latest[-1] if latest else None
         return {
             "employee": {
@@ -207,8 +297,12 @@ class EmployeeHistoryService:
                 "overall_salary_increase_pct": _pct(first_salary, current_salary),
                 "total_promotions": len(promotions),
                 "total_events": len(latest),
+                "total_employee_relations": sum(1 for r in employee_relations if r["status"] != "Deleted"),
+                "open_employee_relations": sum(1 for r in employee_relations
+                                               if str(r["status"] or "").lower() in EMPLOYEE_RELATION_OPEN_STATUSES),
             },
             "requests": cls._requests(request_events),
+            "employee_relations": employee_relations,
             "activity_by_module": {
                 module: count
                 for module, count in audit_log_repository.module_counts_for_employee(db, client_id, employee_id)
