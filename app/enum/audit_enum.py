@@ -9,6 +9,7 @@ class AuditModule(str, Enum):
     WFH = "WFH"
     SPECIAL_REQUESTS = "Special Requests"
     EMPLOYEE_RELATIONS = "Employee Relations"
+    ROSTER_MANAGEMENT = "Roster Management"
     ATTENDANCE = "Attendance"
     OVERTIME = "Overtime"
     DOCUMENTS = "Documents"
@@ -21,7 +22,8 @@ class AuditModule(str, Enum):
 
 
 class AuditCategory(str, Enum):
-    """The 19 top-level audit categories from the requirements (section 23), plus Employee Relations."""
+    """The 19 top-level audit categories from the requirements (section 23), plus Employee Relations
+    and Roster Management."""
     EMPLOYEE = "Employee"
     PROMOTION = "Promotion"
     SALARY = "Salary"
@@ -33,6 +35,7 @@ class AuditCategory(str, Enum):
     WFH = "WFH"
     SPECIAL_REQUESTS = "Special Requests"
     EMPLOYEE_RELATIONS = "Employee Relations"
+    ROSTER_MANAGEMENT = "Roster Management"
     ATTENDANCE = "Attendance"
     OVERTIME = "Overtime"
     DOCUMENTS = "Documents"
